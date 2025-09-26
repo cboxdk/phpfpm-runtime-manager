@@ -1,0 +1,68 @@
+# Inline Pool Configuration
+# Pools managed directly in global PHP-FPM config without separate files
+
+server:
+  bind_address: "127.0.0.1:9090"
+  metrics_path: "/metrics"
+
+# Global PHP-FPM configuration management
+phpfpm:
+  global_config_path: "/opt/phpfpm-runtime-manager/php-fpm.conf"
+  # When pools don't have separate config_path, they should be defined inline in global config
+
+pools:
+  # Pool without separate config file - managed inline in global config
+  - name: "web"
+    # config_path: omitted - pool config is inline in global config
+    fastcgi_endpoint: "127.0.0.1:9000"
+    fastcgi_status_path: "/status"
+    max_workers: 20
+    health_check:
+      enabled: true
+      interval: "30s"
+    scaling:
+      enabled: true
+      min_workers: 5
+      max_workers: 20
+      target_utilization: 0.7
+
+  # Another inline pool
+  - name: "api"
+    # config_path: omitted - pool config is inline in global config
+    fastcgi_endpoint: "127.0.0.1:9001"
+    fastcgi_status_path: "/status"
+    max_workers: 15
+    health_check:
+      enabled: true
+      interval: "30s"
+    scaling:
+      enabled: true
+      min_workers: 3
+      max_workers: 15
+      target_utilization: 0.6
+
+# In-memory storage for simplicity
+storage:
+  database_path: ":memory:"
+  retention:
+    raw: "6h"
+    minute: "24h"
+
+# Fast monitoring for development
+monitoring:
+  collect_interval: "5s"
+
+  string_interning:
+    enabled: true
+  json_pooling:
+    enabled: true
+
+# Basic circuit breaker
+resilience:
+  circuit_breaker:
+    enabled: true
+
+# Console logging for development
+logging:
+  level: "info"
+  format: "console"

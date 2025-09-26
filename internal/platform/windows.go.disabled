@@ -1,0 +1,416 @@
+//go:build windows
+
+package platform
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// WindowsProvider implements platform interfaces for Windows systems
+type WindowsProvider struct {
+	fs FileSystemProvider
+}
+
+// NewWindowsProvider creates a new Windows platform provider
+func NewWindowsProvider() *WindowsProvider {
+	return &WindowsProvider{
+		fs: &RealFileSystemProvider{},
+	}
+}
+
+// NewWindowsProviderWithFS creates a Windows provider with custom filesystem (for testing)
+func NewWindowsProviderWithFS(fs FileSystemProvider) *WindowsProvider {
+	return &WindowsProvider{
+		fs: fs,
+	}
+}
+
+// Memory returns the Windows memory provider
+func (p *WindowsProvider) Memory() MemoryProvider {
+	return &WindowsMemoryProvider{fs: p.fs}
+}
+
+// Process returns the Windows process provider
+func (p *WindowsProvider) Process() ProcessProvider {
+	return &WindowsProcessProvider{fs: p.fs}
+}
+
+// FileSystem returns the filesystem provider
+func (p *WindowsProvider) FileSystem() FileSystemProvider {
+	return p.fs
+}
+
+// Platform returns the platform name
+func (p *WindowsProvider) Platform() string {
+	return "windows"
+}
+
+// Architecture returns the system architecture
+func (p *WindowsProvider) Architecture() string {
+	return runtime.GOARCH
+}
+
+// SupportsFeature checks if a feature is supported on Windows
+func (p *WindowsProvider) SupportsFeature(feature string) bool {
+	switch feature {
+	case FeatureWMI:
+		return true
+	case FeaturePerfMon:
+		return true
+	case FeatureProcFS:
+		return false // Windows doesn't have /proc filesystem
+	case FeatureCGroups:
+		return false // Windows doesn't support cgroups (has job objects instead)
+	case FeatureSysctl:
+		return false
+	case FeatureBSD:
+		return false
+	default:
+		return false
+	}
+}
+
+// WindowsMemoryProvider implements MemoryProvider for Windows
+type WindowsMemoryProvider struct {
+	fs FileSystemProvider
+}
+
+// GetSystemMemory uses WMI/PowerShell to get system memory information on Windows
+func (m *WindowsMemoryProvider) GetSystemMemory(ctx context.Context) (*SystemInfo, error) {
+	info := &SystemInfo{
+		Platform:     "windows",
+		Architecture: runtime.GOARCH,
+		SupportsWMI:  true,
+		SupportsPerf: true,
+	}
+
+	// Get total memory using WMI
+	totalBytes, err := m.getWMIMemoryInfo("TotalPhysicalMemory")
+	if err != nil {
+		return nil, &PlatformError{
+			Op:       "get_total_memory",
+			Platform: "windows",
+			Err:      err,
+		}
+	}
+	info.TotalMemoryBytes = totalBytes
+
+	// Get available memory
+	availableBytes, err := m.getWMIMemoryInfo("AvailablePhysicalMemory")
+	if err == nil {
+		info.AvailableMemoryBytes = availableBytes
+		info.UsedMemoryBytes = totalBytes - availableBytes
+		info.FreeMemoryBytes = availableBytes // On Windows, available ≈ free for simplicity
+	} else {
+		// Fallback: estimate available memory as 60% of total
+		info.AvailableMemoryBytes = totalBytes * 60 / 100
+		info.FreeMemoryBytes = info.AvailableMemoryBytes
+		info.UsedMemoryBytes = totalBytes - info.AvailableMemoryBytes
+	}
+
+	// Get OS version
+	if osVer, err := m.getWindowsVersion(); err == nil {
+		info.KernelVersion = osVer
+	}
+
+	return info, nil
+}
+
+// GetProcessMemory gets process memory information using PowerShell/WMI
+func (m *WindowsMemoryProvider) GetProcessMemory(ctx context.Context, pid int) (*ProcessInfo, error) {
+	// Use PowerShell to get process information
+	script := fmt.Sprintf(`Get-Process -Id %d | Select-Object Id,ParentProcessId,ProcessName,WorkingSet,VirtualMemorySize,UserProcessorTime,PrivilegedProcessorTime`, pid)
+
+	cmd := exec.CommandContext(ctx, "powershell", "-Command", script)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, &PlatformError{
+			Op:       "get_process_info",
+			Platform: "windows",
+			Err:      err,
+		}
+	}
+
+	info := &ProcessInfo{
+		PID:        pid,
+		LastUpdate: time.Now(),
+		State:      string(ProcessStateRunning), // Default state
+	}
+
+	// Parse PowerShell output (simplified)
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, "---") {
+			continue
+		}
+
+		// This is a simplified parser - real implementation would be more robust
+		if strings.Contains(line, ":") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+
+				switch key {
+				case "ProcessName":
+					info.Name = value
+				case "ParentProcessId":
+					if ppid, err := strconv.Atoi(value); err == nil {
+						info.PPID = ppid
+					}
+				case "WorkingSet":
+					if ws, err := strconv.ParseUint(value, 10, 64); err == nil {
+						info.ResidentMemory = ws
+					}
+				case "VirtualMemorySize":
+					if vms, err := strconv.ParseUint(value, 10, 64); err == nil {
+						info.VirtualMemory = vms
+					}
+				}
+			}
+		}
+	}
+
+	return info, nil
+}
+
+// GetAvailableMemory returns available memory
+func (m *WindowsMemoryProvider) GetAvailableMemory(ctx context.Context) (uint64, error) {
+	sysInfo, err := m.GetSystemMemory(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return sysInfo.AvailableMemoryBytes, nil
+}
+
+// SupportsRealtime returns true for Windows
+func (m *WindowsMemoryProvider) SupportsRealtime() bool {
+	return true
+}
+
+// GetProvider returns the provider type
+func (m *WindowsMemoryProvider) GetProvider() string {
+	return "windows"
+}
+
+// WindowsProcessProvider implements ProcessProvider for Windows
+type WindowsProcessProvider struct {
+	fs FileSystemProvider
+}
+
+// ListProcesses returns all processes using PowerShell
+func (p *WindowsProcessProvider) ListProcesses(ctx context.Context) ([]*ProcessInfo, error) {
+	script := `Get-Process | Select-Object Id,ParentProcessId,ProcessName,WorkingSet,VirtualMemorySize | ConvertTo-Csv -NoTypeInformation`
+
+	cmd := exec.CommandContext(ctx, "powershell", "-Command", script)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, &PlatformError{
+			Op:       "list_processes",
+			Platform: "windows",
+			Err:      err,
+		}
+	}
+
+	lines := strings.Split(string(output), "\n")
+	var processes []*ProcessInfo
+
+	// Skip header line
+	for i := 1; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+
+		// Parse CSV line (simplified)
+		fields := strings.Split(line, ",")
+		if len(fields) < 5 {
+			continue
+		}
+
+		// Remove quotes from CSV fields
+		for j := range fields {
+			fields[j] = strings.Trim(fields[j], "\"")
+		}
+
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+
+		ppid, _ := strconv.Atoi(fields[1])
+
+		info := &ProcessInfo{
+			PID:        pid,
+			PPID:       ppid,
+			Name:       fields[2],
+			State:      string(ProcessStateRunning),
+			LastUpdate: time.Now(),
+		}
+
+		// Parse memory fields
+		if ws, err := strconv.ParseUint(fields[3], 10, 64); err == nil {
+			info.ResidentMemory = ws
+		}
+		if vms, err := strconv.ParseUint(fields[4], 10, 64); err == nil {
+			info.VirtualMemory = vms
+		}
+
+		processes = append(processes, info)
+	}
+
+	return processes, nil
+}
+
+// GetProcess returns information for a specific process
+func (p *WindowsProcessProvider) GetProcess(ctx context.Context, pid int) (*ProcessInfo, error) {
+	memProvider := &WindowsMemoryProvider{fs: p.fs}
+	return memProvider.GetProcessMemory(ctx, pid)
+}
+
+// FindProcessesByName finds processes matching a name pattern
+func (p *WindowsProcessProvider) FindProcessesByName(ctx context.Context, namePattern string) ([]*ProcessInfo, error) {
+	script := fmt.Sprintf(`Get-Process | Where-Object {$_.ProcessName -like "*%s*"} | Select-Object Id,ParentProcessId,ProcessName,WorkingSet,VirtualMemorySize`, namePattern)
+
+	cmd := exec.CommandContext(ctx, "powershell", "-Command", script)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, &PlatformError{
+			Op:       "find_processes_by_name",
+			Platform: "windows",
+			Err:      err,
+		}
+	}
+
+	var processes []*ProcessInfo
+	lines := strings.Split(string(output), "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, "---") {
+			continue
+		}
+
+		// Simplified parsing - would need more robust CSV parsing in production
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+
+		if pid, err := strconv.Atoi(fields[0]); err == nil {
+			processInfo, err := p.GetProcess(context.Background(), pid)
+			if err != nil {
+				continue
+			}
+			processes = append(processes, processInfo)
+		}
+	}
+
+	return processes, nil
+}
+
+// MonitorProcess starts monitoring a process
+func (p *WindowsProcessProvider) MonitorProcess(ctx context.Context, pid int) (<-chan *ProcessInfo, error) {
+	ch := make(chan *ProcessInfo)
+
+	go func() {
+		defer close(ch)
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				processInfo, err := p.GetProcess(ctx, pid)
+				if err != nil {
+					// Process disappeared
+					return
+				}
+				ch <- processInfo
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+// ProcessExists checks if a process exists using PowerShell
+func (p *WindowsProcessProvider) ProcessExists(ctx context.Context, pid int) (bool, error) {
+	script := fmt.Sprintf(`Get-Process -Id %d -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count`, pid)
+
+	cmd := exec.CommandContext(ctx, "powershell", "-Command", script)
+	output, err := cmd.Output()
+	if err != nil {
+		return false, &PlatformError{
+			Op:       "check_process_exists",
+			Platform: "windows",
+			Err:      err,
+		}
+	}
+
+	count := strings.TrimSpace(string(output))
+	return count == "1", nil
+}
+
+// KillProcess terminates a process using PowerShell
+func (p *WindowsProcessProvider) KillProcess(ctx context.Context, pid int) error {
+	script := fmt.Sprintf(`Stop-Process -Id %d -Force`, pid)
+
+	cmd := exec.CommandContext(ctx, "powershell", "-Command", script)
+	err := cmd.Run()
+	if err != nil {
+		return &PlatformError{
+			Op:       "kill_process",
+			Platform: "windows",
+			Err:      err,
+		}
+	}
+	return nil
+}
+
+// GetProvider returns the provider type
+func (p *WindowsProcessProvider) GetProvider() string {
+	return "windows"
+}
+
+// Helper functions for Windows
+
+// getWMIMemoryInfo gets memory information using WMI
+func (m *WindowsMemoryProvider) getWMIMemoryInfo(property string) (uint64, error) {
+	script := fmt.Sprintf(`Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object -ExpandProperty %s`, property)
+
+	cmd := exec.Command("powershell", "-Command", script)
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, err
+	}
+
+	value, err := strconv.ParseUint(strings.TrimSpace(string(output)), 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return value, nil
+}
+
+// getWindowsVersion gets Windows version information
+func (m *WindowsMemoryProvider) getWindowsVersion() (string, error) {
+	script := `Get-CimInstance -ClassName Win32_OperatingSystem | Select-Object -ExpandProperty Caption`
+
+	cmd := exec.Command("powershell", "-Command", script)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}

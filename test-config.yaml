@@ -1,0 +1,17 @@
+server:
+  bind_address: "127.0.0.1:8080"
+  metrics_path: "/metrics"
+
+monitoring:
+  interval: "5s"
+  collection_timeout: "3s"
+
+pools:
+  - name: "webapp"
+    autoscaling:
+      enabled: true
+      min_workers: 1
+      max_workers: 3
+      target_cpu_utilization: 50.0
+    metrics:
+      collection_interval: "2s"

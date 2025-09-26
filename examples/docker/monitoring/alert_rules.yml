@@ -1,0 +1,163 @@
+# Prometheus alerting rules for PHP-FPM Runtime Manager
+# Production-ready alerts for monitoring pool health and performance
+
+groups:
+  - name: phpfpm-manager-alerts
+    rules:
+      # High pool utilization
+      - alert: PHPFPMHighUtilization
+        expr: phpfpm_pool_workers_active / phpfpm_pool_workers_total > 0.8
+        for: 2m
+        labels:
+          severity: warning
+          service: phpfpm
+        annotations:
+          summary: "High PHP-FPM pool utilization on {{ $labels.pool }}"
+          description: "Pool {{ $labels.pool }} has {{ $value | humanizePercentage }} worker utilization for over 2 minutes"
+
+      # Critical pool utilization
+      - alert: PHPFPMCriticalUtilization
+        expr: phpfpm_pool_workers_active / phpfpm_pool_workers_total > 0.95
+        for: 30s
+        labels:
+          severity: critical
+          service: phpfpm
+        annotations:
+          summary: "Critical PHP-FPM pool utilization on {{ $labels.pool }}"
+          description: "Pool {{ $labels.pool }} has {{ $value | humanizePercentage }} worker utilization - immediate action required"
+
+      # Pool health check failures
+      - alert: PHPFPMPoolDown
+        expr: phpfpm_pool_health_status == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: phpfpm
+        annotations:
+          summary: "PHP-FPM pool {{ $labels.pool }} is down"
+          description: "Pool {{ $labels.pool }} health check has been failing for over 1 minute"
+
+      # High request queue
+      - alert: PHPFPMHighRequestQueue
+        expr: phpfpm_pool_listen_queue > 10
+        for: 2m
+        labels:
+          severity: warning
+          service: phpfpm
+        annotations:
+          summary: "High request queue on pool {{ $labels.pool }}"
+          description: "Pool {{ $labels.pool }} has {{ $value }} requests in queue - consider scaling"
+
+      # Slow requests
+      - alert: PHPFPMSlowRequests
+        expr: rate(phpfpm_pool_slow_requests_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          service: phpfpm
+        annotations:
+          summary: "High slow request rate on pool {{ $labels.pool }}"
+          description: "Pool {{ $labels.pool }} has {{ $value | humanize }} slow requests per second"
+
+      # Runtime manager connectivity
+      - alert: PHPFPMManagerDown
+        expr: up{job="phpfpm-manager"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: phpfpm-manager
+        annotations:
+          summary: "PHP-FPM Runtime Manager is down"
+          description: "Runtime Manager has been unreachable for over 1 minute"
+
+      # High memory usage per worker
+      - alert: PHPFPMHighMemoryUsage
+        expr: phpfpm_pool_memory_usage_bytes / phpfpm_pool_workers_active > 100 * 1024 * 1024
+        for: 5m
+        labels:
+          severity: warning
+          service: phpfpm
+        annotations:
+          summary: "High memory usage per worker in pool {{ $labels.pool }}"
+          description: "Average memory usage per worker in pool {{ $labels.pool }} is {{ $value | humanizeBytes }}"
+
+      # Circuit breaker open
+      - alert: PHPFPMCircuitBreakerOpen
+        expr: phpfpm_circuit_breaker_state == 2
+        for: 30s
+        labels:
+          severity: warning
+          service: phpfpm
+        annotations:
+          summary: "Circuit breaker open for pool {{ $labels.pool }}"
+          description: "Circuit breaker for pool {{ $labels.pool }} is open - requests are being rejected"
+
+  - name: system-alerts
+    rules:
+      # High CPU usage
+      - alert: HighCPUUsage
+        expr: 100 - (avg(irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "High CPU usage detected"
+          description: "CPU usage is above 80% for over 5 minutes"
+
+      # High memory usage
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "High memory usage detected"
+          description: "Memory usage is above 85% for over 5 minutes"
+
+      # Disk space low
+      - alert: DiskSpaceLow
+        expr: (1 - (node_filesystem_free_bytes{fstype!="tmpfs"} / node_filesystem_size_bytes{fstype!="tmpfs"})) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "Low disk space on {{ $labels.device }}"
+          description: "Disk space usage is above 85% on {{ $labels.device }}"
+
+  - name: container-alerts
+    rules:
+      # Container down
+      - alert: ContainerDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: container
+        annotations:
+          summary: "Container {{ $labels.instance }} is down"
+          description: "Container {{ $labels.instance }} has been down for over 1 minute"
+
+      # High container CPU
+      - alert: ContainerHighCPU
+        expr: rate(container_cpu_usage_seconds_total[5m]) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: container
+        annotations:
+          summary: "High CPU usage in container {{ $labels.name }}"
+          description: "Container {{ $labels.name }} CPU usage is above 80%"
+
+      # High container memory
+      - alert: ContainerHighMemory
+        expr: (container_memory_usage_bytes / container_spec_memory_limit_bytes) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+          service: container
+        annotations:
+          summary: "High memory usage in container {{ $labels.name }}"
+          description: "Container {{ $labels.name }} memory usage is above 90% of limit"

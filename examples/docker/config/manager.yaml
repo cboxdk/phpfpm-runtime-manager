@@ -1,0 +1,213 @@
+# PHP-FPM Runtime Manager Configuration for Docker
+# Production-ready configuration with container networking
+
+# ⚠️ CRITICAL: PHP-FPM Global Configuration
+phpfpm:
+  global_config_path: "/usr/local/etc/php-fpm.conf"  # Container path
+  # Manager will modify this to enable dynamic pool management
+
+server:
+  bind_address: "0.0.0.0:9090"
+  metrics_path: "/metrics"
+
+  # Health check endpoint
+  health_check:
+    enabled: true
+    endpoint: "/health"
+
+# Container-based pool configurations
+pools:
+  - name: "web"
+    config_path: "/usr/local/etc/php-fpm.d/web.conf"
+    fastcgi_endpoint: "php-fpm-web:9000"
+    fastcgi_status_path: "/status"
+    max_workers: 20
+    health_check:
+      enabled: true
+      interval: "30s"
+      timeout: "10s"
+    scaling:
+      enabled: true
+      min_workers: 5
+      max_workers: 20
+      target_utilization: 0.7
+
+  - name: "api"
+    config_path: "/usr/local/etc/php-fpm.d/api.conf"
+    fastcgi_endpoint: "php-fpm-api:9000"
+    fastcgi_status_path: "/status"
+    max_workers: 15
+    health_check:
+      enabled: true
+      interval: "30s"
+      timeout: "10s"
+    scaling:
+      enabled: true
+      min_workers: 3
+      max_workers: 15
+      target_utilization: 0.6
+
+# Persistent storage with Docker volume
+storage:
+  database_path: "/app/data/metrics.db"
+
+  # Enhanced connection pool
+  connection_pool:
+    enabled: true
+    max_open_conns: 25
+    max_idle_conns: 10
+    conn_max_lifetime: "2h"
+    health_interval: "30s"
+
+  # Retention policies
+  retention:
+    raw: "12h"
+    minute: "168h"  # 7 days
+    hour: "2160h"   # 90 days
+    # daily aggregations are not supported in current config structure
+
+# Optimized monitoring for container environment
+monitoring:
+  collect_interval: "5s"
+
+  # Adaptive collection based on load
+  adaptive_collection:
+    enabled: true
+    base_interval: "5s"
+    max_interval: "30s"
+    load_threshold: 0.8
+
+  # Performance optimizations
+  string_interning:
+    enabled: true
+    capacity: 256
+
+  json_pooling:
+    enabled: true
+    buffer_size: 1024
+
+  label_caching:
+    enabled: true
+    max_entries: 1000
+
+  # Batch processing
+  batching:
+    enabled: true
+    size: 50
+    flush_timeout: "5s"
+    max_batches: 4
+
+# Circuit breaker for container networking
+resilience:
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 3
+    recovery_timeout: "30s"
+    success_threshold: 2
+    timeout: "10s"
+    max_concurrent_requests: 2
+
+# Structured logging for containers
+logging:
+  level: "info"
+  format: "json"
+  file: "/app/logs/manager.log"
+
+  # Container-friendly logging
+  structured: true
+  include_caller: false
+
+  # Log rotation for containers
+  rotation:
+    max_size: "50MB"
+    max_files: 3
+    # max_age is not supported in current config structure
+
+# Telemetry with OpenTelemetry Collector
+telemetry:
+  enabled: true
+  service_name: "phpfpm-runtime-manager"
+  service_version: "1.0.0"
+  deployment_environment: "docker"
+
+  # Export to OpenTelemetry Collector
+  exporter:
+    type: "otlp"
+    endpoint: "http://otel-collector:4317"
+    insecure: true
+
+  # Resource attributes for container identification
+  resource:
+    attributes:
+      container.name: "${HOSTNAME}"
+      service.namespace: "phpfpm"
+      deployment.environment: "docker"
+
+  # Sampling configuration
+  sampling:
+    rate: 0.1  # 10% sampling
+
+  # Event configuration
+  events:
+    enabled: true
+    buffer_size: 500
+    flush_interval: "10s"
+
+    # Include container context in events
+    include_context:
+      container_id: true
+      hostname: true
+      environment: true
+
+# Security configuration for container environment
+security:
+  # Disable authentication in trusted container network
+  auth:
+    enabled: false
+
+  # Input validation
+  validation:
+    max_request_size: "1MB"
+    max_pool_name_length: 32
+    allowed_characters: "a-zA-Z0-9_-"
+
+  # Rate limiting
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 1000
+    burst: 100
+
+# API configuration
+api:
+  enabled: true
+  version: "v1"
+
+  # CORS for container networking
+  cors:
+    enabled: true
+    allowed_origins:
+      - "http://nginx"
+      - "http://localhost:*"
+    allowed_methods:
+      - "GET"
+      - "POST"
+      - "PUT"
+      - "DELETE"
+    allowed_headers:
+      - "Content-Type"
+      - "Authorization"
+
+# Metrics export configuration
+metrics:
+  # Prometheus exposition
+  prometheus:
+    enabled: true
+    path: "/metrics"
+    include_go_metrics: false
+    include_process_metrics: true
+
+  # Additional metric labels for container context
+  labels:
+    environment: "docker"
+    cluster: "local"
+    version: "1.0.0"

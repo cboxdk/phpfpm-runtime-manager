@@ -1,0 +1,182 @@
+# Multi-Pool PHP-FPM Runtime Manager Configuration
+# Demonstrates managing multiple PHP-FPM pools with different characteristics
+
+server:
+  bind_address: "0.0.0.0:9090"
+  metrics_path: "/metrics"
+
+  # Enable TLS for production
+  tls:
+    enabled: false  # Set to true in production
+    cert_file: "/etc/ssl/phpfpm-manager.crt"
+    key_file: "/etc/ssl/phpfpm-manager.key"
+
+# Security configuration
+security:
+  auth:
+    enabled: false  # Set to true in production
+    type: "api_key"
+    api_keys:
+      - "your-secure-api-key-here"
+
+# Global PHP-FPM configuration management
+phpfpm:
+  binary_path: "/Users/syda/Library/Application Support/Herd/bin/php84-fpm"  # For testing
+  global_config_path: "/opt/phpfpm-runtime-manager/php-fpm.conf"
+  # include_path: "/etc/php-fpm.d/*.conf"  # Auto-detected from global config
+
+# Multiple pools with different configurations
+pools:
+  # Web frontend pool - high traffic, quick responses
+  - name: "web"
+    config_path: "/opt/phpfpm-runtime-manager/pools.d/web.conf"
+    fastcgi_endpoint: "127.0.0.1:9050"  # Avoid conflict with Herd's port 9000
+    fastcgi_status_path: "/status"
+    max_workers: 50
+    health_check:
+      enabled: true
+      interval: "15s"
+      timeout: "5s"
+    scaling:
+      enabled: true
+      min_workers: 10
+      max_workers: 50
+      target_utilization: 0.7
+
+  # API pool - moderate traffic, more resources per request
+  - name: "api"
+    config_path: "/opt/phpfpm-runtime-manager/pools.d/api.conf"
+    fastcgi_endpoint: "127.0.0.1:9051"  # Unique port for API pool
+    fastcgi_status_path: "/status"
+    max_workers: 25
+    health_check:
+      enabled: true
+      interval: "30s"
+      timeout: "10s"
+    scaling:
+      enabled: true
+      min_workers: 5
+      max_workers: 25
+      target_utilization: 0.6
+
+  # Background upload pool - file processing, uploads
+  - name: "upload"
+    config_path: "/opt/phpfpm-runtime-manager/pools.d/upload.conf"
+    # fastcgi_endpoint: "unix:/opt/phpfpm-runtime-manager/sockets/upload.sock"  # Test auto-generation
+    fastcgi_status_path: "/status"
+    max_workers: 10
+    health_check:
+      enabled: true
+      interval: "60s"
+      timeout: "30s"
+    scaling:
+      enabled: true
+      min_workers: 2
+      max_workers: 10
+      target_utilization: 0.8
+
+  # Admin panel pool - low traffic, high availability
+  - name: "panel"
+    config_path: "/opt/phpfpm-runtime-manager/pools.d/panel.conf"
+    fastcgi_endpoint: "127.0.0.1:9052"  # Unique port for panel pool
+    fastcgi_status_path: "/status"
+    max_workers: 5
+    health_check:
+      enabled: true
+      interval: "20s"
+      timeout: "5s"
+    scaling:
+      enabled: false  # Keep stable for admin functions
+
+# Enhanced storage configuration
+storage:
+  database_path: "/opt/phpfpm-runtime-manager/metrics.db"
+
+  # Connection pool for better performance
+  connection_pool:
+    enabled: true
+    max_open_conns: 25
+    max_idle_conns: 10
+    conn_max_lifetime: "2h"
+    health_interval: "30s"
+
+  # Retention policies for different data types
+  retention:
+    raw: "6h"      # High-frequency data
+    minute: "168h"  # Minute aggregations (7 days)
+    hour: "2160h"   # Hour aggregations (90 days)
+    # daily aggregations are not supported in current config structure
+
+# Optimized monitoring configuration
+monitoring:
+  collect_interval: "2s"  # Higher frequency for multiple pools
+
+  # Advanced adaptive collection
+  adaptive_collection:
+    enabled: true
+    base_interval: "2s"
+    max_interval: "10s"
+    load_threshold: 0.8
+
+  # Performance optimizations
+  string_interning:
+    enabled: true
+    capacity: 512  # Larger cache for multiple pools
+
+  json_pooling:
+    enabled: true
+    buffer_size: 2048  # Larger buffers for complex metrics
+
+  label_caching:
+    enabled: true
+    max_entries: 2000  # More cache for multiple label sets
+
+  # Batch processing for efficiency
+  batching:
+    enabled: true
+    size: 100
+    flush_timeout: "3s"
+    max_batches: 8
+
+# Circuit breaker configuration per service type
+resilience:
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5
+    recovery_timeout: "30s"
+    success_threshold: 3
+    timeout: "5s"
+    max_concurrent_requests: 2
+
+# Advanced logging
+logging:
+  level: "info"
+  format: "json"
+  file: "/var/log/phpfpm-manager.log"
+
+  # Log rotation
+  rotation:
+    max_size: "100MB"
+    max_files: 5
+    # max_age is not supported in current config structure
+
+# Telemetry for observability
+telemetry:
+  enabled: true
+  service_name: "phpfpm-runtime-manager"
+  service_version: "1.0.0"
+
+  # Export to observability backend
+  exporter:
+    type: "otlp"
+    endpoint: "http://localhost:4317"
+
+  # Sampling for production efficiency
+  sampling:
+    rate: 0.1  # 10% sampling
+
+  # Enhanced event tracking
+  events:
+    enabled: true
+    buffer_size: 1000
+    flush_interval: "10s"

@@ -1,0 +1,235 @@
+# PHP-FPM Runtime Manager Configuration
+# This is an example configuration file showing all available options
+
+# Global PHP-FPM configuration
+phpfpm:
+  # Path to the global PHP-FPM configuration file
+  global_config_path: "/opt/phpfpm-runtime-manager/php-fpm.conf"
+
+  # Optional: Path to additional include directory
+  # include_path: "/opt/phpfpm-runtime-manager/pools.d"
+
+# HTTP server configuration for metrics and management endpoints
+server:
+  # Address and port to bind the HTTP server
+  bind_address: "0.0.0.0:9090"
+
+  # Path for Prometheus metrics endpoint
+  metrics_path: "/metrics"
+
+  # TLS configuration (optional)
+  tls:
+    enabled: false
+    cert_file: "/etc/ssl/certs/phpfpm-manager.crt"
+    key_file: "/etc/ssl/private/phpfpm-manager.key"
+
+  # Authentication configuration for metrics endpoint
+  auth:
+    # Enable authentication
+    enabled: false
+
+    # Authentication type: api_key, basic, mtls
+    type: "api_key"
+
+    # Single API key (simple configuration)
+    api_key: "your-secret-api-key-here-minimum-32-chars"
+
+    # Basic authentication credentials
+    basic:
+      username: "admin"
+      password: "secure-password"
+
+    # Multiple API keys with scopes (advanced configuration)
+    api_keys:
+      - name: "prometheus"
+        key: "prom-api-key-32-characters-minimum-length"
+        scopes: ["metrics"]
+      - name: "monitoring"
+        key: "mon-api-key-32-characters-minimum-length-"
+        scopes: ["metrics", "health"]
+
+  # REST API configuration for operational control
+  api:
+    # Enable REST API endpoints
+    enabled: true
+
+    # Base path for API endpoints
+    base_path: "/api/v1"
+
+    # Maximum requests per second for API endpoints
+    max_requests: 100
+
+# Timeseries storage configuration
+storage:
+  # Path to SQLite database file
+  database_path: "./data/metrics.db"
+
+  # Data retention policies
+  retention:
+    # Raw metrics retention (high resolution)
+    raw: "24h"
+
+    # Minute-aggregated metrics retention
+    minute: "168h"  # 7 days
+
+    # Hour-aggregated metrics retention
+    hour: "8760h"   # 365 days
+
+  # Data aggregation settings
+  aggregation:
+    # Enable automatic data aggregation
+    enabled: true
+
+    # Aggregation interval
+    interval: "1m"
+
+    # Batch size for aggregation operations
+    batch_size: 1000
+
+# PHP-FPM pool configurations
+pools:
+  # Web pool configuration
+  - name: "web"
+    # Path to PHP-FPM pool configuration file
+    config_path: "/opt/phpfpm-runtime-manager/pools.d/web.conf"
+
+    # FastCGI endpoint (TCP or Unix socket)
+    fastcgi_endpoint: "unix:/opt/phpfpm-runtime-manager/sockets/web.sock"
+
+    # FastCGI status path
+    fastcgi_status_path: "/status"
+
+    # Maximum number of workers for this pool
+    max_workers: 50
+
+    # Health check configuration
+    health_check:
+      enabled: true
+      interval: "30s"
+      timeout: "5s"
+      retries: 3
+      endpoint: "http://127.0.0.1:9000/ping"
+
+    # Resource limits and thresholds
+    resources:
+      cpu_threshold: 80.0      # CPU usage threshold (%)
+      memory_threshold: 85.0   # Memory usage threshold (%)
+      max_memory_mb: 512       # Maximum memory per process (MB)
+
+  # API pool configuration
+  - name: "api"
+    config_path: "/opt/phpfpm-runtime-manager/pools.d/api.conf"
+    fastcgi_endpoint: "unix:/opt/phpfpm-runtime-manager/sockets/api.sock"
+    fastcgi_status_path: "/status"
+    max_workers: 30
+
+    health_check:
+      enabled: true
+      interval: "15s"
+      timeout: "3s"
+      retries: 5
+      endpoint: "http://127.0.0.1:9000/ping"
+
+    resources:
+      cpu_threshold: 75.0
+      memory_threshold: 90.0
+      max_memory_mb: 256
+
+  # Background jobs pool configuration
+  - name: "queue"
+    config_path: "/opt/phpfpm-runtime-manager/pools.d/queue.conf"
+    fastcgi_endpoint: "unix:/opt/phpfpm-runtime-manager/sockets/queue.sock"
+    fastcgi_status_path: "/status"
+    max_workers: 20
+
+    health_check:
+      enabled: true
+      interval: "60s"
+      timeout: "10s"
+      retries: 3
+      endpoint: "http://127.0.0.1:9000/ping"
+
+    resources:
+      cpu_threshold: 70.0
+      memory_threshold: 80.0
+      max_memory_mb: 1024
+
+# Monitoring and metrics collection configuration
+monitoring:
+  # Metrics collection interval
+  collect_interval: "1s"
+
+  # Health check interval for all pools
+  health_check_interval: "5s"
+
+  # System-wide thresholds for alerting
+  cpu_threshold: 80.0
+  memory_threshold: 85.0
+
+  # Enable opcache metrics collection
+  enable_opcache: true
+
+  # Enable system-level metrics collection
+  enable_system_metrics: true
+
+# Logging configuration
+logging:
+  # Log level: debug, info, warn, error
+  level: "info"
+
+  # Log format: json, console
+  format: "json"
+
+  # Log output path (stdout, stderr, or file path)
+  output_path: "stdout"
+
+  # Use structured logging
+  structured: true
+
+# Telemetry configuration (OpenTelemetry)
+telemetry:
+  # Enable telemetry data collection
+  enabled: false
+
+  # Service identification
+  service_name: "phpfpm-runtime-manager"
+  service_version: "1.0.0"
+  environment: "production"
+
+  # Exporter configuration
+  exporter:
+    # Exporter type: stdout, otlp, jaeger
+    type: "stdout"
+
+    # OTLP endpoint (required for otlp type)
+    # endpoint: "http://localhost:4317"
+
+    # Additional headers for OTLP
+    # headers:
+    #   authorization: "Bearer your-token"
+
+  # Sampling configuration
+  sampling:
+    # Sampling rate (0.0 to 1.0)
+    # 0.1 = 10% of traces, 1.0 = all traces
+    rate: 0.1
+
+# Security configuration
+security:
+  # Allow access to internal networks (for containers)
+  allow_internal_networks: false
+
+  # Additional allowed network CIDRs
+  allowed_networks:
+    - "192.168.1.0/24"
+    - "10.0.0.0/8"
+
+  # Allowed URL schemes
+  allowed_schemes:
+    - "http"
+    - "https"
+
+  # Input validation settings
+  max_pool_name_length: 64
+  max_api_key_length: 128
+  max_event_summary_length: 1024

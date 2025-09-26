@@ -1,0 +1,228 @@
+package platform
+
+import (
+	"context"
+	"testing"
+)
+
+// TestGetPlatformProvider tests the platform provider factory
+func TestGetPlatformProvider(t *testing.T) {
+	provider := GetPlatformProvider()
+	if provider == nil {
+		t.Fatal("GetPlatformProvider returned nil")
+	}
+
+	platform := provider.Platform()
+	if platform == "" {
+		t.Error("Platform name should not be empty")
+	}
+
+	architecture := provider.Architecture()
+	if architecture == "" {
+		t.Error("Architecture should not be empty")
+	}
+
+	t.Logf("Platform: %s, Architecture: %s", platform, architecture)
+}
+
+// TestPlatformCapabilities tests platform capability detection
+func TestPlatformCapabilities(t *testing.T) {
+	capabilities := DetectPlatformCapabilities()
+	if len(capabilities) == 0 {
+		t.Error("Should have at least some capabilities")
+	}
+
+	for feature, supported := range capabilities {
+		t.Logf("Feature %s: %v", feature, supported)
+	}
+}
+
+// TestIsPlatformSupported tests platform support detection
+func TestIsPlatformSupported(t *testing.T) {
+	supported := IsPlatformSupported()
+	t.Logf("Platform supported: %v", supported)
+}
+
+// TestGetPlatformInfo tests platform information retrieval
+func TestGetPlatformInfo(t *testing.T) {
+	info := GetPlatformInfo()
+	if len(info) == 0 {
+		t.Error("Should have platform information")
+	}
+
+	for key, value := range info {
+		t.Logf("%s: %s", key, value)
+	}
+}
+
+// TestMockProvider tests the mock provider functionality
+func TestMockProvider(t *testing.T) {
+	provider := NewMockProvider()
+	if provider == nil {
+		t.Fatal("NewMockProvider returned nil")
+	}
+
+	// Test basic provider operations
+	if provider.Platform() != "mock" {
+		t.Errorf("Expected platform 'mock', got '%s'", provider.Platform())
+	}
+
+	// Test memory provider
+	memProvider := provider.Memory()
+	if memProvider == nil {
+		t.Fatal("Memory provider should not be nil")
+	}
+
+	ctx := context.Background()
+	sysInfo, err := memProvider.GetSystemMemory(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemMemory failed: %v", err)
+	}
+
+	if sysInfo.TotalMemoryBytes == 0 {
+		t.Error("Total memory should be greater than 0")
+	}
+
+	// Test process provider
+	procProvider := provider.Process()
+	if procProvider == nil {
+		t.Fatal("Process provider should not be nil")
+	}
+
+	processes, err := procProvider.ListProcesses(ctx)
+	if err != nil {
+		t.Fatalf("ListProcesses failed: %v", err)
+	}
+
+	if len(processes) == 0 {
+		t.Error("Mock provider should return some processes")
+	}
+
+	// Test filesystem provider
+	fsProvider := provider.FileSystem()
+	if fsProvider == nil {
+		t.Fatal("Filesystem provider should not be nil")
+	}
+
+	if fsProvider.GetProvider() != "mock" {
+		t.Errorf("Expected filesystem provider 'mock', got '%s'", fsProvider.GetProvider())
+	}
+}
+
+// TestPlatformProviderWithFS tests custom filesystem provider
+func TestPlatformProviderWithFS(t *testing.T) {
+	// Create a mock filesystem
+	mockFS := &MockFileSystemProvider{
+		files: make(map[string][]byte),
+		dirs:  make(map[string]bool),
+	}
+
+	// Test file operations
+	testPath := "/test/file.txt"
+	testContent := []byte("test content")
+
+	err := mockFS.WriteFile(testPath, testContent, FileMode0644)
+	if err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	exists, err := mockFS.Exists(testPath)
+	if err != nil {
+		t.Fatalf("Exists check failed: %v", err)
+	}
+	if !exists {
+		t.Error("File should exist after writing")
+	}
+
+	readContent, err := mockFS.ReadFile(testPath)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+
+	if string(readContent) != string(testContent) {
+		t.Errorf("Read content '%s' doesn't match written content '%s'", string(readContent), string(testContent))
+	}
+
+	// Create provider with custom filesystem
+	provider := GetPlatformProviderWithFS(mockFS)
+	if provider == nil {
+		t.Fatal("GetPlatformProviderWithFS returned nil")
+	}
+
+	if provider.FileSystem().GetProvider() != "mock" {
+		t.Errorf("Expected mock filesystem, got '%s'", provider.FileSystem().GetProvider())
+	}
+}
+
+// TestSetAndResetPlatformProvider tests provider override functionality
+func TestSetAndResetPlatformProvider(t *testing.T) {
+	// Get original provider
+	originalProvider := GetPlatformProvider()
+
+	// Create a mock provider
+	mockProvider := NewMockProvider()
+	mockProvider.SetPlatform("test-platform")
+
+	// Set the mock provider
+	SetPlatformProvider(mockProvider)
+
+	// Verify the provider was changed
+	currentProvider := GetPlatformProvider()
+	if currentProvider.Platform() != "test-platform" {
+		t.Errorf("Expected platform 'test-platform', got '%s'", currentProvider.Platform())
+	}
+
+	// Reset the provider
+	ResetPlatformProvider()
+
+	// Verify the provider was reset
+	resetProvider := GetPlatformProvider()
+	if resetProvider.Platform() == "test-platform" {
+		t.Error("Provider should have been reset")
+	}
+
+	// Restore original for other tests
+	SetPlatformProvider(originalProvider)
+}
+
+// TestValidatePlatformRequirements tests platform requirement validation
+func TestValidatePlatformRequirements(t *testing.T) {
+	// Test with no requirements (should always pass)
+	err := ValidatePlatformRequirements([]string{})
+	if err != nil {
+		t.Errorf("Empty requirements should always pass: %v", err)
+	}
+
+	// Test with supported features
+	provider := GetPlatformProvider()
+	var supportedFeatures []string
+	for _, feature := range []string{FeatureProcFS, FeatureSysctl, FeatureWMI, FeaturePerfMon} {
+		if provider.SupportsFeature(feature) {
+			supportedFeatures = append(supportedFeatures, feature)
+			break // Just test one supported feature
+		}
+	}
+
+	if len(supportedFeatures) > 0 {
+		err = ValidatePlatformRequirements(supportedFeatures)
+		if err != nil {
+			t.Errorf("Supported features should pass validation: %v", err)
+		}
+	}
+
+	// Test with unsupported features
+	var unsupportedFeatures []string
+	for _, feature := range []string{FeatureProcFS, FeatureSysctl, FeatureWMI, FeaturePerfMon} {
+		if !provider.SupportsFeature(feature) {
+			unsupportedFeatures = append(unsupportedFeatures, feature)
+			break // Just test one unsupported feature
+		}
+	}
+
+	if len(unsupportedFeatures) > 0 {
+		err = ValidatePlatformRequirements(unsupportedFeatures)
+		if err == nil {
+			t.Error("Unsupported features should fail validation")
+		}
+	}
+}

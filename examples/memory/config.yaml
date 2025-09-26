@@ -1,0 +1,75 @@
+# In-Memory PHP-FPM Runtime Manager Configuration
+# Perfect for testing, development, or temporary monitoring
+
+# Essential: PHP-FPM Global Configuration
+phpfpm:
+  global_config_path: "/opt/phpfpm-runtime-manager/php-fpm.conf"
+  # For development, backup is still recommended
+
+server:
+  bind_address: "127.0.0.1:9090"
+  metrics_path: "/metrics"
+
+pools:
+  - name: "web"
+    config_path: "/opt/phpfpm-runtime-manager/pools.d/www.conf"
+    fastcgi_endpoint: "127.0.0.1:9000"  # TCP: host:port or Unix: unix:/path/to/socket
+    fastcgi_status_path: "/status"
+    max_workers: 10
+    health_check:
+      enabled: true
+      interval: "30s"
+
+# In-memory storage - data lost on restart
+storage:
+  database_path: ":memory:"
+
+  # Connection pool still useful for concurrency
+  connection_pool:
+    enabled: true
+    max_open_conns: 10
+    max_idle_conns: 5
+
+  # Retention not relevant for memory, but keeping for config completeness
+  retention:
+    raw: "1h"     # Only keep recent data in memory
+    minute: "6h"  # Shorter retention for memory efficiency
+    hour: "24h"   # Limited history in memory
+
+# Fast collection for in-memory
+monitoring:
+  collect_interval: "1s"  # High frequency since no disk I/O
+
+  # Optimizations especially useful for memory
+  string_interning:
+    enabled: true
+    capacity: 128  # Smaller cache for memory efficiency
+
+  json_pooling:
+    enabled: true
+    buffer_size: 512
+
+  label_caching:
+    enabled: true
+    max_entries: 500  # Limited for memory usage
+
+  # Aggressive batching to reduce memory overhead
+  batching:
+    enabled: true
+    size: 100
+    flush_timeout: "1s"  # Quick flushes for memory
+    max_batches: 2
+
+# Circuit breaker important for memory stability
+resilience:
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 2
+    recovery_timeout: "15s"
+    timeout: "5s"
+
+# Console logging for development
+logging:
+  level: "debug"  # More verbose for development
+  format: "console"  # Human-readable for testing
+  # No file logging for pure memory setup

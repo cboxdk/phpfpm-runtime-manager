@@ -1,0 +1,470 @@
+//go:build darwin
+
+package platform
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// DarwinProvider implements platform interfaces for macOS systems
+type DarwinProvider struct {
+	fs FileSystemProvider
+}
+
+// NewDarwinProvider creates a new macOS platform provider
+func NewDarwinProvider() *DarwinProvider {
+	return &DarwinProvider{
+		fs: &RealFileSystemProvider{},
+	}
+}
+
+// NewDarwinProviderWithFS creates a Darwin provider with custom filesystem (for testing)
+func NewDarwinProviderWithFS(fs FileSystemProvider) *DarwinProvider {
+	return &DarwinProvider{
+		fs: fs,
+	}
+}
+
+// Memory returns the Darwin memory provider
+func (p *DarwinProvider) Memory() MemoryProvider {
+	return &DarwinMemoryProvider{fs: p.fs}
+}
+
+// Process returns the Darwin process provider
+func (p *DarwinProvider) Process() ProcessProvider {
+	return &DarwinProcessProvider{fs: p.fs}
+}
+
+// FileSystem returns the filesystem provider
+func (p *DarwinProvider) FileSystem() FileSystemProvider {
+	return p.fs
+}
+
+// Platform returns the platform name
+func (p *DarwinProvider) Platform() string {
+	return "darwin"
+}
+
+// Architecture returns the system architecture
+func (p *DarwinProvider) Architecture() string {
+	return runtime.GOARCH
+}
+
+// SupportsFeature checks if a feature is supported on macOS
+func (p *DarwinProvider) SupportsFeature(feature string) bool {
+	switch feature {
+	case FeatureSysctl:
+		return true
+	case FeatureBSD:
+		return true
+	case FeatureProcFS:
+		return false // macOS doesn't have /proc filesystem
+	case FeatureCGroups:
+		return false // macOS doesn't support cgroups
+	case FeatureWMI:
+		return false
+	case FeaturePerfMon:
+		// Performance monitoring through sysctl and ps
+		return true
+	default:
+		return false
+	}
+}
+
+// DarwinMemoryProvider implements MemoryProvider for macOS
+type DarwinMemoryProvider struct {
+	fs FileSystemProvider
+}
+
+// GetSystemMemory uses sysctl to get system memory information on macOS
+func (m *DarwinMemoryProvider) GetSystemMemory(ctx context.Context) (*SystemInfo, error) {
+	info := &SystemInfo{
+		Platform:       "darwin",
+		Architecture:   runtime.GOARCH,
+		SupportsSysctl: true,
+		SupportsBSD:    true,
+	}
+
+	// Get total memory using sysctl
+	totalBytes, err := m.getSysctlMemory("hw.memsize")
+	if err != nil {
+		return nil, &PlatformError{
+			Op:       "get_total_memory",
+			Platform: "darwin",
+			Err:      err,
+		}
+	}
+	info.TotalMemoryBytes = totalBytes
+
+	// Get memory pressure information
+	memoryPressure, err := m.getMemoryPressure()
+	if err == nil {
+		info.AvailableMemoryBytes = memoryPressure.Available
+		info.FreeMemoryBytes = memoryPressure.Free
+		info.UsedMemoryBytes = memoryPressure.Used
+	} else {
+		// Fallback: estimate available memory as 70% of total
+		info.AvailableMemoryBytes = totalBytes * 70 / 100
+		info.FreeMemoryBytes = info.AvailableMemoryBytes
+		info.UsedMemoryBytes = totalBytes - info.AvailableMemoryBytes
+	}
+
+	// Get kernel version
+	if kernelVer, err := m.getSysctlString("kern.version"); err == nil {
+		info.KernelVersion = kernelVer
+	}
+
+	return info, nil
+}
+
+// GetProcessMemory gets process memory information using ps command
+func (m *DarwinMemoryProvider) GetProcessMemory(ctx context.Context, pid int) (*ProcessInfo, error) {
+	// Use ps command to get process information
+	cmd := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "pid,ppid,comm,state,rss,vsz")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, &PlatformError{
+			Op:       "get_process_info",
+			Platform: "darwin",
+			Err:      err,
+		}
+	}
+
+	lines := strings.Split(string(output), "\n")
+	if len(lines) < 2 {
+		return nil, &PlatformError{
+			Op:       "parse_process_info",
+			Platform: "darwin",
+			Err:      fmt.Errorf("process %d not found", pid),
+		}
+	}
+
+	// Parse the second line (first line is header)
+	fields := strings.Fields(lines[1])
+	if len(fields) < 6 {
+		return nil, &PlatformError{
+			Op:       "parse_process_fields",
+			Platform: "darwin",
+			Err:      fmt.Errorf("insufficient process data"),
+		}
+	}
+
+	info := &ProcessInfo{
+		PID:        pid,
+		LastUpdate: time.Now(),
+	}
+
+	// Parse fields: PID PPID COMM STATE RSS VSZ
+	if ppid, err := strconv.Atoi(fields[1]); err == nil {
+		info.PPID = ppid
+	}
+
+	info.Name = fields[2]
+	info.State = string(ParseProcessState(fields[3]))
+
+	// RSS (Resident Set Size) in KB
+	if rss, err := strconv.ParseUint(fields[4], 10, 64); err == nil {
+		info.ResidentMemory = rss * 1024 // Convert KB to bytes
+	}
+
+	// VSZ (Virtual Size) in KB
+	if vsz, err := strconv.ParseUint(fields[5], 10, 64); err == nil {
+		info.VirtualMemory = vsz * 1024 // Convert KB to bytes
+	}
+
+	return info, nil
+}
+
+// GetAvailableMemory returns available memory
+func (m *DarwinMemoryProvider) GetAvailableMemory(ctx context.Context) (uint64, error) {
+	sysInfo, err := m.GetSystemMemory(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return sysInfo.AvailableMemoryBytes, nil
+}
+
+// SupportsRealtime returns true for macOS
+func (m *DarwinMemoryProvider) SupportsRealtime() bool {
+	return true
+}
+
+// GetProvider returns the provider type
+func (m *DarwinMemoryProvider) GetProvider() string {
+	return "darwin"
+}
+
+// DarwinProcessProvider implements ProcessProvider for macOS
+type DarwinProcessProvider struct {
+	fs FileSystemProvider
+}
+
+// ListProcesses returns all processes using ps command
+func (p *DarwinProcessProvider) ListProcesses(ctx context.Context) ([]*ProcessInfo, error) {
+	cmd := exec.CommandContext(ctx, "ps", "-eo", "pid,ppid,comm,state,rss,vsz")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, &PlatformError{
+			Op:       "list_processes",
+			Platform: "darwin",
+			Err:      err,
+		}
+	}
+
+	lines := strings.Split(string(output), "\n")
+	var processes []*ProcessInfo
+
+	// Skip header line
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+
+		fields := strings.Fields(lines[i])
+		if len(fields) < 6 {
+			continue
+		}
+
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+
+		ppid, _ := strconv.Atoi(fields[1])
+
+		info := &ProcessInfo{
+			PID:        pid,
+			PPID:       ppid,
+			Name:       fields[2],
+			State:      string(ParseProcessState(fields[3])),
+			LastUpdate: time.Now(),
+		}
+
+		// Parse memory fields
+		if rss, err := strconv.ParseUint(fields[4], 10, 64); err == nil {
+			info.ResidentMemory = rss * 1024
+		}
+		if vsz, err := strconv.ParseUint(fields[5], 10, 64); err == nil {
+			info.VirtualMemory = vsz * 1024
+		}
+
+		processes = append(processes, info)
+	}
+
+	return processes, nil
+}
+
+// GetProcess returns information for a specific process
+func (p *DarwinProcessProvider) GetProcess(ctx context.Context, pid int) (*ProcessInfo, error) {
+	memProvider := &DarwinMemoryProvider{fs: p.fs}
+	return memProvider.GetProcessMemory(ctx, pid)
+}
+
+// FindProcessesByName finds processes matching a name pattern
+func (p *DarwinProcessProvider) FindProcessesByName(ctx context.Context, namePattern string) ([]*ProcessInfo, error) {
+	// Use pgrep command for efficient name-based searching
+	cmd := exec.CommandContext(ctx, "pgrep", "-f", namePattern)
+	output, err := cmd.Output()
+	if err != nil {
+		// pgrep returns exit code 1 if no matches, which is not an error
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return []*ProcessInfo{}, nil
+		}
+		return nil, &PlatformError{
+			Op:       "find_processes_by_name",
+			Platform: "darwin",
+			Err:      err,
+		}
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var processes []*ProcessInfo
+
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		pid, err := strconv.Atoi(line)
+		if err != nil {
+			continue
+		}
+
+		processInfo, err := p.GetProcess(ctx, pid)
+		if err != nil {
+			continue // Process may have disappeared
+		}
+
+		processes = append(processes, processInfo)
+	}
+
+	return processes, nil
+}
+
+// MonitorProcess starts monitoring a process
+func (p *DarwinProcessProvider) MonitorProcess(ctx context.Context, pid int) (<-chan *ProcessInfo, error) {
+	ch := make(chan *ProcessInfo)
+
+	go func() {
+		defer close(ch)
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				processInfo, err := p.GetProcess(ctx, pid)
+				if err != nil {
+					// Process disappeared
+					return
+				}
+				ch <- processInfo
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+// ProcessExists checks if a process exists using kill -0
+func (p *DarwinProcessProvider) ProcessExists(ctx context.Context, pid int) (bool, error) {
+	cmd := exec.CommandContext(ctx, "kill", "-0", strconv.Itoa(pid))
+	err := cmd.Run()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			// Exit code 1 typically means process not found
+			if exitErr.ExitCode() == 1 {
+				return false, nil
+			}
+		}
+		return false, &PlatformError{
+			Op:       "check_process_exists",
+			Platform: "darwin",
+			Err:      err,
+		}
+	}
+	return true, nil
+}
+
+// KillProcess terminates a process
+func (p *DarwinProcessProvider) KillProcess(ctx context.Context, pid int) error {
+	cmd := exec.CommandContext(ctx, "kill", strconv.Itoa(pid))
+	err := cmd.Run()
+	if err != nil {
+		return &PlatformError{
+			Op:       "kill_process",
+			Platform: "darwin",
+			Err:      err,
+		}
+	}
+	return nil
+}
+
+// GetProvider returns the provider type
+func (p *DarwinProcessProvider) GetProvider() string {
+	return "darwin"
+}
+
+// Helper functions for macOS
+
+// getSysctlMemory gets memory value using sysctl
+func (m *DarwinMemoryProvider) getSysctlMemory(key string) (uint64, error) {
+	cmd := exec.Command("sysctl", "-n", key)
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, err
+	}
+
+	value, err := strconv.ParseUint(strings.TrimSpace(string(output)), 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return value, nil
+}
+
+// getSysctlString gets string value using sysctl
+func (m *DarwinMemoryProvider) getSysctlString(key string) (string, error) {
+	cmd := exec.Command("sysctl", "-n", key)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+// MemoryPressureInfo holds memory pressure information
+type MemoryPressureInfo struct {
+	Available uint64
+	Free      uint64
+	Used      uint64
+}
+
+// getMemoryPressure gets memory pressure information using vm_stat
+func (m *DarwinMemoryProvider) getMemoryPressure() (*MemoryPressureInfo, error) {
+	cmd := exec.Command("vm_stat")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse vm_stat output
+	lines := strings.Split(string(output), "\n")
+	var pageSize uint64 = 4096 // Default page size
+	var freePages, inactivePages, activePages uint64
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "page size of ") {
+			// Extract page size
+			parts := strings.Fields(line)
+			if len(parts) >= 4 {
+				if size, err := strconv.ParseUint(parts[3], 10, 64); err == nil {
+					pageSize = size
+				}
+			}
+		} else if strings.HasPrefix(line, "Pages free:") {
+			if pages := extractPagesFromVMStat(line); pages > 0 {
+				freePages = pages
+			}
+		} else if strings.HasPrefix(line, "Pages inactive:") {
+			if pages := extractPagesFromVMStat(line); pages > 0 {
+				inactivePages = pages
+			}
+		} else if strings.HasPrefix(line, "Pages active:") {
+			if pages := extractPagesFromVMStat(line); pages > 0 {
+				activePages = pages
+			}
+		}
+	}
+
+	return &MemoryPressureInfo{
+		Free:      freePages * pageSize,
+		Available: (freePages + inactivePages) * pageSize,
+		Used:      activePages * pageSize,
+	}, nil
+}
+
+// extractPagesFromVMStat extracts page count from vm_stat line
+func extractPagesFromVMStat(line string) uint64 {
+	// Format: "Pages free: 12345."
+	parts := strings.Fields(line)
+	if len(parts) < 3 {
+		return 0
+	}
+
+	pageStr := strings.TrimSuffix(parts[2], ".")
+	if pages, err := strconv.ParseUint(pageStr, 10, 64); err == nil {
+		return pages
+	}
+	return 0
+}

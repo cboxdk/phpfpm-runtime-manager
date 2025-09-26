@@ -1,0 +1,381 @@
+//go:build linux
+
+package platform
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// LinuxProvider implements platform interfaces for Linux systems
+type LinuxProvider struct {
+	fs FileSystemProvider
+}
+
+// NewLinuxProvider creates a new Linux platform provider
+func NewLinuxProvider() *LinuxProvider {
+	return &LinuxProvider{
+		fs: &RealFileSystemProvider{},
+	}
+}
+
+// NewLinuxProviderWithFS creates a Linux provider with custom filesystem (for testing)
+func NewLinuxProviderWithFS(fs FileSystemProvider) *LinuxProvider {
+	return &LinuxProvider{
+		fs: fs,
+	}
+}
+
+// Memory returns the Linux memory provider
+func (p *LinuxProvider) Memory() MemoryProvider {
+	return &LinuxMemoryProvider{fs: p.fs}
+}
+
+// Process returns the Linux process provider
+func (p *LinuxProvider) Process() ProcessProvider {
+	return &LinuxProcessProvider{fs: p.fs}
+}
+
+// FileSystem returns the filesystem provider
+func (p *LinuxProvider) FileSystem() FileSystemProvider {
+	return p.fs
+}
+
+// Platform returns the platform name
+func (p *LinuxProvider) Platform() string {
+	return "linux"
+}
+
+// Architecture returns the system architecture
+func (p *LinuxProvider) Architecture() string {
+	return runtime.GOARCH
+}
+
+// SupportsFeature checks if a feature is supported on Linux
+func (p *LinuxProvider) SupportsFeature(feature string) bool {
+	switch feature {
+	case FeatureProcFS:
+		return true
+	case FeatureCGroups:
+		// Check if cgroups are available
+		exists, _ := p.fs.Exists("/proc/cgroups")
+		return exists
+	case FeatureSysctl:
+		return true
+	case FeatureWMI, FeatureBSD:
+		return false
+	case FeaturePerfMon:
+		// Basic performance monitoring through /proc
+		return true
+	default:
+		return false
+	}
+}
+
+// LinuxMemoryProvider implements MemoryProvider for Linux
+type LinuxMemoryProvider struct {
+	fs FileSystemProvider
+}
+
+// GetSystemMemory reads system memory information from /proc/meminfo
+func (m *LinuxMemoryProvider) GetSystemMemory(ctx context.Context) (*SystemInfo, error) {
+	data, err := m.fs.ReadFile("/proc/meminfo")
+	if err != nil {
+		return nil, &PlatformError{
+			Op:       "read_meminfo",
+			Platform: "linux",
+			Err:      err,
+		}
+	}
+
+	info := &SystemInfo{
+		Platform:      "linux",
+		Architecture:  runtime.GOARCH,
+		SupportsProc:  true,
+		SupportsSysctl: true,
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+
+		key := strings.TrimSuffix(parts[0], ":")
+		value, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			continue
+		}
+
+		// Convert from kB to bytes
+		valueBytes := value * 1024
+
+		switch key {
+		case "MemTotal":
+			info.TotalMemoryBytes = valueBytes
+		case "MemAvailable":
+			info.AvailableMemoryBytes = valueBytes
+		case "MemFree":
+			info.FreeMemoryBytes = valueBytes
+		}
+	}
+
+	// Calculate used memory
+	info.UsedMemoryBytes = info.TotalMemoryBytes - info.FreeMemoryBytes
+
+	// Try to get kernel version
+	if kernelData, err := m.fs.ReadFile("/proc/version"); err == nil {
+		info.KernelVersion = strings.TrimSpace(string(kernelData))
+	}
+
+	return info, nil
+}
+
+// GetProcessMemory reads process memory from /proc/[pid]/status
+func (m *LinuxMemoryProvider) GetProcessMemory(ctx context.Context, pid int) (*ProcessInfo, error) {
+	statusPath := fmt.Sprintf("/proc/%d/status", pid)
+	data, err := m.fs.ReadFile(statusPath)
+	if err != nil {
+		return nil, &PlatformError{
+			Op:       "read_process_status",
+			Platform: "linux",
+			Err:      err,
+		}
+	}
+
+	info := &ProcessInfo{
+		PID:        pid,
+		LastUpdate: time.Now(),
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+
+		key := strings.TrimSuffix(parts[0], ":")
+
+		switch key {
+		case "Name":
+			if len(parts) >= 2 {
+				info.Name = parts[1]
+			}
+		case "PPid":
+			if ppid, err := strconv.Atoi(parts[1]); err == nil {
+				info.PPID = ppid
+			}
+		case "State":
+			if len(parts) >= 2 {
+				info.State = string(ParseProcessState(parts[1]))
+			}
+		case "VmSize":
+			if value, err := strconv.ParseUint(parts[1], 10, 64); err == nil {
+				info.VirtualMemory = value * 1024 // Convert kB to bytes
+			}
+		case "VmRSS":
+			if value, err := strconv.ParseUint(parts[1], 10, 64); err == nil {
+				info.ResidentMemory = value * 1024 // Convert kB to bytes
+			}
+		}
+	}
+
+	// Try to get CPU time from /proc/[pid]/stat
+	if statData, err := m.fs.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+		if cpuTime := parseLinuxCPUTime(string(statData)); cpuTime > 0 {
+			info.CPUTime = cpuTime
+		}
+	}
+
+	return info, nil
+}
+
+// GetAvailableMemory returns available memory from /proc/meminfo
+func (m *LinuxMemoryProvider) GetAvailableMemory(ctx context.Context) (uint64, error) {
+	sysInfo, err := m.GetSystemMemory(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	// Prefer MemAvailable if available, otherwise use MemFree
+	if sysInfo.AvailableMemoryBytes > 0 {
+		return sysInfo.AvailableMemoryBytes, nil
+	}
+	return sysInfo.FreeMemoryBytes, nil
+}
+
+// SupportsRealtime returns true for Linux
+func (m *LinuxMemoryProvider) SupportsRealtime() bool {
+	return true
+}
+
+// GetProvider returns the provider type
+func (m *LinuxMemoryProvider) GetProvider() string {
+	return "linux"
+}
+
+// LinuxProcessProvider implements ProcessProvider for Linux
+type LinuxProcessProvider struct {
+	fs FileSystemProvider
+}
+
+// ListProcesses returns all processes from /proc
+func (p *LinuxProcessProvider) ListProcesses(ctx context.Context) ([]*ProcessInfo, error) {
+	procDirs, err := filepath.Glob("/proc/[0-9]*")
+	if err != nil {
+		return nil, &PlatformError{
+			Op:       "list_processes",
+			Platform: "linux",
+			Err:      err,
+		}
+	}
+
+	var processes []*ProcessInfo
+	for _, procDir := range procDirs {
+		pidStr := filepath.Base(procDir)
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+
+		// Use memory provider to get process info
+		memProvider := &LinuxMemoryProvider{fs: p.fs}
+		processInfo, err := memProvider.GetProcessMemory(ctx, pid)
+		if err != nil {
+			// Process may have disappeared, continue
+			continue
+		}
+
+		processes = append(processes, processInfo)
+	}
+
+	return processes, nil
+}
+
+// GetProcess returns information for a specific process
+func (p *LinuxProcessProvider) GetProcess(ctx context.Context, pid int) (*ProcessInfo, error) {
+	memProvider := &LinuxMemoryProvider{fs: p.fs}
+	return memProvider.GetProcessMemory(ctx, pid)
+}
+
+// FindProcessesByName finds processes matching a name pattern
+func (p *LinuxProcessProvider) FindProcessesByName(ctx context.Context, namePattern string) ([]*ProcessInfo, error) {
+	processes, err := p.ListProcesses(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	pattern, err := regexp.Compile(namePattern)
+	if err != nil {
+		return nil, &PlatformError{
+			Op:       "compile_pattern",
+			Platform: "linux",
+			Err:      err,
+		}
+	}
+
+	var matches []*ProcessInfo
+	for _, proc := range processes {
+		if pattern.MatchString(proc.Name) {
+			matches = append(matches, proc)
+		}
+	}
+
+	return matches, nil
+}
+
+// MonitorProcess starts monitoring a process (simplified implementation)
+func (p *LinuxProcessProvider) MonitorProcess(ctx context.Context, pid int) (<-chan *ProcessInfo, error) {
+	ch := make(chan *ProcessInfo)
+
+	go func() {
+		defer close(ch)
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				processInfo, err := p.GetProcess(ctx, pid)
+				if err != nil {
+					// Process disappeared
+					return
+				}
+				ch <- processInfo
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+// ProcessExists checks if a process exists
+func (p *LinuxProcessProvider) ProcessExists(ctx context.Context, pid int) (bool, error) {
+	exists, err := p.fs.Exists(fmt.Sprintf("/proc/%d", pid))
+	if err != nil {
+		return false, &PlatformError{
+			Op:       "check_process_exists",
+			Platform: "linux",
+			Err:      err,
+		}
+	}
+	return exists, nil
+}
+
+// KillProcess terminates a process
+func (p *LinuxProcessProvider) KillProcess(ctx context.Context, pid int) error {
+	// This would require syscall access, simplified for now
+	return &PlatformError{
+		Op:       "kill_process",
+		Platform: "linux",
+		Err:      fmt.Errorf("not implemented in abstraction layer"),
+	}
+}
+
+// GetProvider returns the provider type
+func (p *LinuxProcessProvider) GetProvider() string {
+	return "linux"
+}
+
+// Helper functions
+
+// parseLinuxCPUTime parses CPU time from /proc/[pid]/stat
+func parseLinuxCPUTime(statLine string) time.Duration {
+	fields := strings.Fields(statLine)
+	if len(fields) < 15 {
+		return 0
+	}
+
+	// Fields 13 and 14 are utime and stime (user and system time in clock ticks)
+	utime, err1 := strconv.ParseUint(fields[13], 10, 64)
+	stime, err2 := strconv.ParseUint(fields[14], 10, 64)
+
+	if err1 != nil || err2 != nil {
+		return 0
+	}
+
+	// Convert clock ticks to duration (assuming 100 Hz)
+	totalTicks := utime + stime
+	return time.Duration(totalTicks * 10000000) // 10ms per tick
+}
+

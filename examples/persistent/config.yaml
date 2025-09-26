@@ -1,0 +1,133 @@
+# Persistent Storage PHP-FPM Runtime Manager Configuration
+# Configuration with file-based database for data persistence
+
+server:
+  bind_address: "127.0.0.1:9090"
+  metrics_path: "/metrics"
+
+  health_check:
+    enabled: true
+    endpoint: "/health"
+
+pools:
+  - name: "web"
+    config_path: "/opt/phpfpm-runtime-manager/pools.d/www.conf"
+    fastcgi_endpoint: "127.0.0.1:9000"
+    fastcgi_status_path: "/status"
+    max_workers: 20
+    health_check:
+      enabled: true
+      interval: "30s"
+      timeout: "10s"
+    scaling:
+      enabled: true
+      min_workers: 5
+      max_workers: 20
+      target_utilization: 0.7
+
+# Persistent file-based storage
+storage:
+  database_path: "/var/lib/phpfpm-runtime-manager/metrics.db"
+
+  # Enhanced connection pool for file database
+  connection_pool:
+    enabled: true
+    max_open_conns: 25
+    max_idle_conns: 10
+    conn_max_lifetime: "2h"
+    health_interval: "30s"
+
+  # Comprehensive retention policies for historical analysis
+  retention:
+    raw: "12h"     # High-frequency data for recent analysis
+    minute: "168h"  # Minute aggregations for daily analysis (7 days)
+    hour: "2160h"   # Hour aggregations for weekly/monthly trends (90 days)
+    # daily aggregations are not supported in current config structure
+
+# Standard monitoring for production
+monitoring:
+  collect_interval: "5s"
+
+  # Adaptive collection to reduce load during high usage
+  adaptive_collection:
+    enabled: true
+    base_interval: "5s"
+    max_interval: "30s"
+    load_threshold: 0.8
+
+  # Performance optimizations for file I/O
+  string_interning:
+    enabled: true
+    capacity: 256
+
+  json_pooling:
+    enabled: true
+    buffer_size: 1024
+
+  label_caching:
+    enabled: true
+    max_entries: 1000
+
+  # Batching to optimize database writes
+  batching:
+    enabled: true
+    size: 50
+    flush_timeout: "5s"
+    max_batches: 4
+
+# Circuit breaker for database resilience
+resilience:
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 3
+    recovery_timeout: "30s"
+    success_threshold: 2
+    timeout: "10s"
+    max_concurrent_requests: 2
+
+# Production logging with file output
+logging:
+  level: "info"
+  format: "json"
+  file: "/var/log/phpfpm-runtime-manager/manager.log"
+
+  structured: true
+  include_caller: false
+
+  # Log rotation for long-running processes
+  rotation:
+    max_size: "50MB"
+    max_files: 3
+    # max_age is not supported in current config structure
+
+# Security for production use
+security:
+  auth:
+    enabled: false  # Set to true and configure API keys for production
+
+  validation:
+    max_request_size: "1MB"
+    max_pool_name_length: 32
+    allowed_characters: "a-zA-Z0-9_-"
+
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 1000
+    burst: 100
+
+# API configuration
+api:
+  enabled: true
+  version: "v1"
+
+# Metrics export
+metrics:
+  prometheus:
+    enabled: true
+    path: "/metrics"
+    include_go_metrics: false
+    include_process_metrics: true
+
+  labels:
+    environment: "production"
+    persistence: "file"

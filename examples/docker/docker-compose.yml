@@ -1,0 +1,205 @@
+# Complete Docker Setup with Nginx, PHP-FPM, and Runtime Manager
+# Production-ready multi-container setup with monitoring
+
+version: '3.8'
+
+services:
+  # Nginx reverse proxy and web server
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: phpfpm-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./app:/var/www/html:ro
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - php-fpm-web
+      - php-fpm-api
+      - phpfpm-manager
+    networks:
+      - phpfpm-network
+    restart: unless-stopped
+
+  # PHP-FPM Web Pool
+  php-fpm-web:
+    build:
+      context: ./php-fpm
+      dockerfile: Dockerfile
+      args:
+        POOL_NAME: web
+    container_name: phpfpm-web
+    volumes:
+      - ./app:/var/www/html
+      - ./php-fpm/pools/web.conf:/usr/local/etc/php-fpm.d/web.conf:ro
+      - ./php-fpm/php.ini:/usr/local/etc/php/php.ini:ro
+      - ./logs/php-fpm:/var/log/php-fpm
+    environment:
+      - PHP_POOL_NAME=web
+      - PHP_MAX_CHILDREN=20
+      - PHP_START_SERVERS=5
+      - PHP_MIN_SPARE=3
+      - PHP_MAX_SPARE=8
+    networks:
+      - phpfpm-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "php-fpm", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PHP-FPM API Pool
+  php-fpm-api:
+    build:
+      context: ./php-fpm
+      dockerfile: Dockerfile
+      args:
+        POOL_NAME: api
+    container_name: phpfpm-api
+    volumes:
+      - ./app:/var/www/html
+      - ./php-fpm/pools/api.conf:/usr/local/etc/php-fpm.d/api.conf:ro
+      - ./php-fpm/php.ini:/usr/local/etc/php/php.ini:ro
+      - ./logs/php-fpm:/var/log/php-fpm
+    environment:
+      - PHP_POOL_NAME=api
+      - PHP_MAX_CHILDREN=15
+      - PHP_START_SERVERS=3
+      - PHP_MIN_SPARE=2
+      - PHP_MAX_SPARE=5
+    networks:
+      - phpfpm-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "php-fpm", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PHP-FPM Runtime Manager
+  phpfpm-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.manager
+    container_name: phpfpm-manager
+    ports:
+      - "9090:9090"  # Manager HTTP API
+    volumes:
+      - ./config/manager.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+      - ./logs/manager:/app/logs
+    environment:
+      - CONFIG_PATH=/app/config.yaml
+      - LOG_LEVEL=info
+      - DATA_DIR=/app/data
+    depends_on:
+      - php-fpm-web
+      - php-fpm-api
+    networks:
+      - phpfpm-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: phpfpm-prometheus
+    ports:
+      - "9091:9090"  # Prometheus UI
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts:/etc/prometheus/alerts:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    depends_on:
+      - phpfpm-manager
+    networks:
+      - phpfpm-network
+    restart: unless-stopped
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:10.1.2
+    container_name: phpfpm-grafana
+    ports:
+      - "3000:3000"  # Grafana UI
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    depends_on:
+      - prometheus
+    networks:
+      - phpfpm-network
+    restart: unless-stopped
+
+  # Redis for caching and sessions
+  redis:
+    image: redis:7.2-alpine
+    container_name: phpfpm-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - phpfpm-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # OpenTelemetry Collector (optional)
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.86.0
+    container_name: phpfpm-otel
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+      - "8889:8889"  # Prometheus metrics
+    volumes:
+      - ./monitoring/otel-collector.yaml:/etc/otelcol-contrib/otel-collector.yaml:ro
+    command: ["--config=/etc/otelcol-contrib/otel-collector.yaml"]
+    depends_on:
+      - prometheus
+    networks:
+      - phpfpm-network
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  phpfpm-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

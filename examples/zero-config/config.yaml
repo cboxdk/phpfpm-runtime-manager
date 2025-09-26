@@ -1,0 +1,5 @@
+# Zero Configuration Example
+# Completely empty - everything uses intelligent defaults
+
+# This file can even be empty!
+# The runtime manager will automatically create a "web" pool on 127.0.0.1:9000

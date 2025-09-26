@@ -1,0 +1,5 @@
+# Minimal PHP-FPM Runtime Manager Configuration
+# Only the pool name - everything else uses intelligent defaults
+
+pools:
+  - name: "web"
